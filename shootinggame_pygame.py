@@ -18,6 +18,47 @@ RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 BLUE = (0, 0, 255)
 YELLOW = (255, 255, 0)
+CYAN = (0, 200, 200)
+
+class BeamEffect:
+    """攻撃ビームのエフェクトを管理するクラス"""
+    def __init__(self, start_pos, end_pos, color=CYAN, is_blocked=False):
+        self.start_pos = start_pos
+        self.end_pos = end_pos
+        self.color = color
+        self.is_blocked = is_blocked  # ガードされたかどうかのフラグ
+        self.lifetime = 0.25 if is_blocked else 0.15 # ガード時は少し長く表示
+        self.timer = 0.0
+
+    def update(self, delta_time):
+        """エフェクトの生存時間を更新し、時間切れならFalseを返す"""
+        self.timer += delta_time
+        return self.timer < self.lifetime
+
+    def draw(self, screen):
+        """ビームを描画する"""
+        progress = self.timer / self.lifetime
+        alpha = max(0, 255 * (1 - progress))
+        
+        # ガード成功時はビームが途中で止まり、火花が散る
+        if self.is_blocked:
+            draw_end_pos = self.end_pos
+            # sin波を使って明滅する火花を表現
+            spark_radius = int(25 * math.sin(progress * math.pi)) 
+            if spark_radius > 0:
+                pygame.draw.circle(screen, YELLOW, self.end_pos, spark_radius)
+                pygame.draw.circle(screen, WHITE, self.end_pos, spark_radius // 2)
+        else:
+            draw_end_pos = self.end_pos
+
+        # ビーム本体の描画
+        try:
+            # NOTE: 一部のPygame環境ではアルファ付きのline描画が直接できない場合がある
+            pygame.draw.line(screen, (*self.color, int(alpha)), self.start_pos, draw_end_pos, 8)
+        except (TypeError, ValueError):
+             pygame.draw.line(screen, self.color, self.start_pos, draw_end_pos, 8)
+        pygame.draw.line(screen, WHITE, self.start_pos, draw_end_pos, 2)
+
 
 class HandTracker:
     """MediaPipe v0.10+ API に対応した手検出＆ジェスチャー判定クラス"""
@@ -89,26 +130,6 @@ class HandTracker:
         feats.append(float(np.dot(tv, np.array([1,0]))))
         feats.append(float(landmarks[4].z - landmarks[1].z))
         return feats if len(feats)==7 else None
-
-
-class Bullet(pygame.sprite.Sprite):
-    def __init__(self, start_pos, target_pos):
-        super().__init__()
-        self.image = pygame.Surface((10,10))
-        self.image.fill(YELLOW)
-        self.float_x, self.float_y = float(start_pos[0]), float(start_pos[1])
-        self.rect = self.image.get_rect(center=(self.float_x,self.float_y))
-        angle = math.atan2(target_pos[1]-start_pos[1], target_pos[0]-start_pos[0])
-        speed = 15
-        self.vx = math.cos(angle)*speed
-        self.vy = math.sin(angle)*speed
-
-    def update(self):
-        self.float_x += self.vx
-        self.float_y += self.vy
-        self.rect.center = (round(self.float_x), round(self.float_y))
-        if not pygame.Rect(0,0,SCREEN_WIDTH,SCREEN_HEIGHT).colliderect(self.rect):
-            self.kill()
 
 class Enemy(pygame.sprite.Sprite):
     def __init__(self, pos):
@@ -262,12 +283,12 @@ class Game:
         pygame.mixer.music.stop()
         self.player = Player()
         self.enemies = pygame.sprite.Group()
-        self.bullets = pygame.sprite.Group()
         self.game_state = "START"
         self.turn = ""
         self.message = ""
         self.message_timer = 0
         self.turn_timer = 0
+        self.effects = []  
         
         self.handtracker = HandTracker()
         self.barrier = Barrier(self.handtracker)
@@ -301,25 +322,6 @@ class Game:
 
             if self.turn == "PLAYER_TURN":
                 self.enemies.update()
-                self.bullets.update()
-                
-                for bullet in self.bullets:
-                    hit_enemies = pygame.sprite.spritecollide(bullet, self.enemies, False)
-                    if hit_enemies:
-                        if self.hit_sound: self.hit_sound.play()
-                        if hit_enemies[0].take_damage(20):
-                            if not self.enemies:
-                                self.game_state = "CLEAR"
-                                self.set_message("GAME CLEAR!")
-                                # ▼▼▼ 変更点: BGMファイル名を変更 ▼▼▼
-                                pygame.mixer.music.stop()
-                                try:
-                                    pygame.mixer.music.load("sounds/clear.mp3")
-                                    pygame.mixer.music.play(-1)
-                                except pygame.error as e:
-                                    print(f"BGMファイルが見つかりません: {e}")
-                                # ▲▲▲ ここまで変更 ▲▲▲
-                        bullet.kill()
 
                 if self.turn_timer > 10 and self.game_state == "PLAYING":
                     self.turn = "ENEMY_TURN"
@@ -346,13 +348,26 @@ class Game:
                 for attack in self.enemy_attacks[:]:
                     attack["timer"] += self.clock.get_time()
                     if attack["timer"] >= attack["duration"]:
+                        attacker = None
+                        if self.enemies:
+                            attacker = random.choice(self.enemies.sprites())
                         distance = math.hypot(attack["pos"][0] - self.barrier.rect.centerx, attack["pos"][1] - self.barrier.rect.centery)
                         if distance < self.barrier.radius:
                             self.set_message("GUARD SUCCESS!")
                             if self.guard_sound: self.guard_sound.play()
+                            if attacker:
+                            # 敵からバリアまでのベクトル
+                                vec_to_shield = pygame.Vector2(self.barrier.rect.center) - pygame.Vector2(attacker.rect.center)
+                            # バリアの円周上でビームが止まる位置
+                                impact_pos = pygame.Vector2(attacker.rect.center) + vec_to_shield.normalize() * (vec_to_shield.length() - self.barrier.radius)
+                            # ガード成功エフェクト
+                                self.effects.append(BeamEffect(attacker.rect.center, impact_pos, color=YELLOW, is_blocked=True))
                         else:
                             self.set_message("DAMAGE!")
                             if self.hit_sound: self.hit_sound.play()
+                            if attacker:
+                                visual_target_pos = self.player.rect.center
+                                self.effects.append(BeamEffect(attacker.rect.center, visual_target_pos, color=RED))
                             if self.player.take_damage(10):
                                 self.game_state = "OVER"
                                 self.set_message("GAME OVER!")
@@ -376,15 +391,34 @@ class Game:
                         self.set_message("PLAYER TURN")
                         self.turn_timer = 0
                         self.spawn_enemies(3)
+            self.effects = [effect for effect in self.effects if effect.update(self.clock.get_time() / 1000)]
 
     def handle_player_attack(self, target_pos):
         player_gun_pos = (self.player.rect.centerx, self.player.rect.centery - 20)
-        new_bullet = Bullet(player_gun_pos, target_pos)
-        self.bullets.add(new_bullet)
+        self.effects.append(BeamEffect(player_gun_pos, target_pos))
         if self.shoot_sound: self.shoot_sound.play()
+
+        # ★★ 敵との当たり判定追加 ★★
+        beam_vector = pygame.Vector2(target_pos) - pygame.Vector2(player_gun_pos)
+        for enemy in self.enemies:
+            enemy_center = pygame.Vector2(enemy.rect.center)
+            to_enemy = enemy_center - pygame.Vector2(player_gun_pos)
+            # 敵との距離を線分から見て5ピクセル以内と判定
+            if beam_vector.length() == 0:
+                continue
+            projection = to_enemy.dot(beam_vector.normalize())
+            closest_point = pygame.Vector2(player_gun_pos) + beam_vector.normalize() * projection
+            distance = (enemy_center - closest_point).length()
+
+            if 0 <= projection <= beam_vector.length() and distance < 50:  # 50px以内ならヒットとする
+                if enemy.take_damage(30):
+                    self.set_message("ENEMY DOWN!")
+                    if self.hit_sound: self.hit_sound.play()
+
 
     # Gameクラスのdrawメソッド
     def draw(self):
+        pygame.display.flip()
         try:
             background = pygame.image.load("images/stage.png").convert()
             background = pygame.transform.scale(background, (SCREEN_WIDTH, SCREEN_HEIGHT))
@@ -404,9 +438,10 @@ class Game:
                 enemy.draw(self.screen)
 
             self.player.draw(self.screen)
+            for effect in self.effects:
+                effect.draw(self.screen)
             player_hp_text = self.font.render(f"HP: {self.player.health}", True, WHITE)
             self.screen.blit(player_hp_text, (20, SCREEN_HEIGHT - 50))
-            self.bullets.draw(self.screen)
 
             turn_text = self.font.render(f"TURN: {self.turn}", True, YELLOW)
             self.screen.blit(turn_text, (SCREEN_WIDTH // 2 - turn_text.get_width() // 2, 10))
@@ -452,6 +487,13 @@ class Game:
     def set_message(self, text):
         self.message = text
         self.message_timer = pygame.time.get_ticks()
+
+    def draw_text(self, text, center_pos, color=WHITE):
+        """指定された位置にテキストを描画する"""
+        text_surf = self.font.render(text, True, color)
+        text_rect = text_surf.get_rect(center=center_pos)
+        self.screen.blit(text_surf, text_rect)
+
 
 if __name__ == "__main__":
     tracker = HandTracker()

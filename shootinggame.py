@@ -17,13 +17,6 @@ class Player:
     "敵を管理するクラス"
 
 class HandTracker:
-    import cv2
-import numpy as np
-import pandas as pd
-import mediapipe as mp
-from sklearn.ensemble import RandomForestClassifier
-
-class HandTracker:
     """
     MediaPipeによる手の検出と、指の座標+ジェスチャー分類を行うクラス
     """
